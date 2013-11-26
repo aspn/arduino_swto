@@ -1,151 +1,211 @@
+
+//Jeremy Blum's Arduino Tutorial Series - Episode 15 - GPS Tracking
+//Sample Code 2 - Logging GPS Data to an SD Card
+//http://www.jeremyblum.com
+//TinyGPS Library and Helper Functions by Mikal Hart http://arduiniana.org/libraries/tinygps/
+
+
 #include <TinyGPS.h>
+#include <SD.h>
+#include <stdlib.h>
 
-/*
-6-12-12
-Aaron Weiss
-SparkFun Electronics, Beerware
-
-Example GPS Parser based off of arduiniana.org TinyGPS examples.
-
-Parses NMEA sentences from an EM406 running at 4800bps into readable
-values for latitude, longitude, elevation, date, time, course, and
-speed. Use 115200 baud for your serial port baud rate
-
-For the SparkFun GPS Shield. Make sure the switch is set to DLINE.
-
-Once you get your longitude and latitude you can paste your
-coordinates from the terminal window into Google Maps. Here is the
-link for SparkFun's location.
-http://maps.google.com/maps?q=40.06477,+-105.20997
-
-Uses the NewSoftSerial library for serial communication with your GPS,
-so connect your GPS TX and RX pin to any digital pin on the Arduino,
-just be sure to define which pins you are using on the Arduino to
-communicate with the GPS module.
-
-REVISIONS: 1-17-11
-changed values to RXPIN = 2 and TXPIN = to correspond with
-hardware v14+. Hardware v13 used RXPIN = 3 and TXPIN = 2.
-
+/* This sample code demonstrates the normal use of a TinyGPS object.
+   It uses an Arduino Mega with a GPS attached to Serial at 4800 buad.
 */
 
-// In order for this sketch to work, you will need to download
-// TinyGPS and NewSoftSerial library from arduiniana.org and put them
-// into the libraries folder in your ardiuno directory.
-#include <SoftwareSerial.h>
-#include <TinyGPS.h>
-
-// Define which pins you will use on the Arduino to communicate with your
-// GPS. In this case, the GPS module's TX pin will connect to the
-// Arduino's RXPIN which is pin 3.
-#define RXPIN 2
-#define TXPIN 3
-
-// This is the serial rate for your terminal program. It must be this
-// fast because we need to print everything before a new sentence
-// comes in. If you slow it down, the messages might not be valid and
-// you will likely get checksum errors.
-// Set this value equal to the baud rate of your terminal program
-#define TERMBAUD 14400
-
-// Set this value equal to the baud rate of your GPS
-#define GPSBAUD 4800
-
-// Create an instance of the TinyGPS object
 TinyGPS gps;
-// Initialize the NewSoftSer6ial library to the pins you defined above
-SoftwareSerial uart_gps(RXPIN, TXPIN);
+static char dtostrfbuffer[20];
+int CS = 53;
+int LED = 13;
 
-// This is where you declare prototypes for the functions that will be
-// using the TinyGPS library.
-void getgps(TinyGPS &gps);
+//Define String
+String SD_date_time = "invalid";
+String SD_lat = "invalid";
+String SD_lon = "invalid";
+String dataString ="";
 
-// In the setup function, you need to initialize two serial ports; the
-// standard hardware serial port (Serial()) to communicate with your
-// terminal program an another serial port (NewSoftSerial()) for your
-// GPS.
+static void gpsdump(TinyGPS &gps);
+static bool feedgps();
+static void print_float(float val, float invalid, int len, int prec, int SD_val);
+static void print_int(unsigned long val, unsigned long invalid, int len);
+static void print_date(TinyGPS &gps);
+static void print_str(const char *str, int len);
+
 void setup()
 {
-
-// Sets baud rate of your terminal program
-Serial.begin(TERMBAUD);
-// Sets baud rate of your GPS
-uart_gps.begin(GPSBAUD);
-
-Serial.println("");
-Serial.println("GPS Shield QuickStart Example Sketch v12");
-Serial.println(" ...waiting for lock... ");
-Serial.println("");
-Serial.print("{");
-
+  pinMode(CS, OUTPUT);  //Chip Select Pin for the SD Card
+  pinMode(LED, OUTPUT);  //LED Indicator
+  
+  //Serial interfaces
+  Serial.begin(115200);
+  Serial.begin(4800);
+  
+  //Connect to the SD Card
+  if(!SD.begin(CS))
+  {
+    Serial.println("Card Failure");
+    return;
+  }
+  
+  
+  Serial.print("Testing TinyGPS library v. "); Serial.println(TinyGPS::library_version());
+  Serial.println("by Mikal Hart");
+  Serial.println();
+  Serial.print("Sizeof(gpsobject) = "); Serial.println(sizeof(TinyGPS));
+  Serial.println();
+  Serial.println("Sats HDOP Latitude Longitude Fix  Date       Time       Date Alt     Course Speed Card  Distance Course Card  Chars Sentences Checksum");
+  Serial.println("          (deg)    (deg)     Age                        Age  (m)     --- from GPS ----  ---- to London  ----  RX    RX        Fail");
+  Serial.println("--------------------------------------------------------------------------------------------------------------------------------------");
 }
-int ctr = 0;
-// This is the main loop of the code. All it does is check for data on
-// the RX pin of the ardiuno, makes sure the data is valid NMEA sentences,
-// then jumps to the getgps() function.
+
 void loop()
 {
-
-while(uart_gps.available()) // While there is data on the RX pin...
+  bool newdata = false;
+  unsigned long start = millis();
+  
+  // Every second we print an update
+  while (millis() - start < 1000)
   {
-  int c = uart_gps.read(); // load the data into a variable...
-  if(gps.encode(c)) // if there is a new valid sentence...
-    {
-      Serial.print("\"");
-      Serial.print(ctr);
-      Serial.print("\":");
-      getgps(gps); // then grab the data.
-    }
+    if (feedgps())
+      newdata = true;
+  }
+  
+  gpsdump(gps);
+  
+  //Write the newest information to the SD Card
+  dataString = SD_date_time + "," + SD_lat + "," + SD_lon;
+  if(SD_date_time != "invalid")
+    digitalWrite(LED, HIGH);
+  else
+    digitalWrite(LED, LOW);
+    
+  //Open the Data CSV File
+  File dataFile = SD.open("LOG.csv", FILE_WRITE);
+  if (dataFile)
+  {
+    dataFile.println(dataString);
+    Serial.println(dataString);
+    dataFile.close();
+  }
+  else
+  {
+    Serial.println("\nCouldn't open the log file!");
   }
 }
 
-
-// The getgps function will get and print the values we want.
-void getgps(TinyGPS &gps)
+static void gpsdump(TinyGPS &gps)
 {
-// To get all of the data into varialbes that you can use in your code,
-// all you need to do is define variables and query the object for the
-// data. To see the complete list of functions see keywords.txt file in
-// the TinyGPS and NewSoftSerial libs.
-     ctr++;
-// Define the variables that will be used
-float latitude, longitude;
-// Then call this function
-gps.f_get_position(&latitude, &longitude);
-// You can now print variables latitude and longitude
-//Serial.print("Lat/Long: ");
-Serial.print("{");
-//Serial.print(latitude,5);
-Serial.print("\"lat\": ");
-Serial.print(latitude,5);
-Serial.print(",\"long\": ");
-Serial.print(longitude,5);
+  float flat, flon;
+  unsigned long age, date, time, chars = 0;
+  unsigned short sentences = 0, failed = 0;
+  static const float LONDON_LAT = 51.508131, LONDON_LON = -0.128002;
+  
+  print_int(gps.satellites(), TinyGPS::GPS_INVALID_SATELLITES, 5);
+  print_int(gps.hdop(), TinyGPS::GPS_INVALID_HDOP, 5);
+  gps.f_get_position(&flat, &flon, &age); 
+  print_float(flat, TinyGPS::GPS_INVALID_F_ANGLE, 9, 5, 1); //LATITUDE
+  print_float(flon, TinyGPS::GPS_INVALID_F_ANGLE, 10, 5, 2); //LONGITUDE
+  print_int(age, TinyGPS::GPS_INVALID_AGE, 5);
 
-// Same goes for date and time
-int year;
-byte month, day, hour, minute, second, hundredths;
-gps.crack_datetime(&year,&month,&day,&hour,&minute,&second,&hundredths);
-// Print data and time
-Serial.print(",\"date\": \""); Serial.print(month, DEC); Serial.print("/");
-Serial.print(day, DEC); Serial.print("/"); Serial.print(year);
-Serial.print("\" ,\"time\": \""); Serial.print(hour, DEC); Serial.print(":");
-Serial.print(minute, DEC); Serial.print(":"); Serial.print(second, DEC);
-Serial.print("."); Serial.print(hundredths, DEC); Serial.print("\"");
-//Since month, day, hour, minute, second, and hundr
-Serial.println("},");
-// Here you can print the altitude and course values directly since
-// there is only one value for the function
+  print_date(gps); //DATE AND TIME
 
-// Here you can print statistics on the sentences.
-unsigned long chars;
-unsigned short sentences, failed_checksum;
-gps.stats(&chars, &sentences, &failed_checksum);
-//Serial.print("Failed Checksums: ");Serial.print(failed_checksum);
-//Serial.println(); Serial.println();
+  print_float(gps.f_altitude(), TinyGPS::GPS_INVALID_F_ALTITUDE, 8, 2, 0);
+  print_float(gps.f_course(), TinyGPS::GPS_INVALID_F_ANGLE, 7, 2, 0);
+  print_float(gps.f_speed_kmph(), TinyGPS::GPS_INVALID_F_SPEED, 6, 2, 0);
+  print_str(gps.f_course() == TinyGPS::GPS_INVALID_F_ANGLE ? "*** " : TinyGPS::cardinal(gps.f_course()), 6);
+  print_int(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0UL : (unsigned long)TinyGPS::distance_between(flat, flon, LONDON_LAT, LONDON_LON) / 1000, 0xFFFFFFFF, 9);
+  print_float(flat == TinyGPS::GPS_INVALID_F_ANGLE ? 0.0 : TinyGPS::course_to(flat, flon, 51.508131, -0.128002), TinyGPS::GPS_INVALID_F_ANGLE, 7, 2, 0);
+  print_str(flat == TinyGPS::GPS_INVALID_F_ANGLE ? "*** " : TinyGPS::cardinal(TinyGPS::course_to(flat, flon, LONDON_LAT, LONDON_LON)), 6);
 
-// Here you can print the number of satellites in view
-//Serial.print("Satellites: ");
-//Serial.println(gps.satellites());
+  gps.stats(&chars, &sentences, &failed);
+  print_int(chars, 0xFFFFFFFF, 6);
+  print_int(sentences, 0xFFFFFFFF, 10);
+  print_int(failed, 0xFFFFFFFF, 9);
+  Serial.println();
 }
 
+static void print_int(unsigned long val, unsigned long invalid, int len)
+{
+  char sz[32];
+  if (val == invalid)
+    strcpy(sz, "*******");
+  else
+    sprintf(sz, "%ld", val);
+  sz[len] = 0;
+  for (int i=strlen(sz); i<len; ++i)
+    sz[i] = ' ';
+  if (len > 0) 
+    sz[len-1] = ' ';
+  Serial.print(sz);
+  feedgps();
+}
 
+static void print_float(float val, float invalid, int len, int prec, int SD_val)
+{
+  char sz[32];
+  if (val == invalid)
+  {
+    strcpy(sz, "*******");
+    sz[len] = 0;
+        if (len > 0) 
+          sz[len-1] = ' ';
+    for (int i=7; i<len; ++i)
+        sz[i] = ' ';
+    Serial.print(sz);
+    if(SD_val == 1) SD_lat = sz;
+    else if(SD_val == 2) SD_lon = sz;
+  }
+  else
+  {
+    Serial.print(val, prec);
+    if (SD_val == 1) SD_lat = dtostrf(val,10,5,dtostrfbuffer);
+    else if (SD_val == 2) SD_lon = dtostrf(val,10,5,dtostrfbuffer);
+    int vi = abs((int)val);
+    int flen = prec + (val < 0.0 ? 2 : 1);
+    flen += vi >= 1000 ? 4 : vi >= 100 ? 3 : vi >= 10 ? 2 : 1;
+    for (int i=flen; i<len; ++i)
+      Serial.print(" ");
+  }
+  feedgps();
+}
+
+static void print_date(TinyGPS &gps)
+{
+  int year;
+  byte month, day, hour, minute, second, hundredths;
+  unsigned long age;
+  gps.crack_datetime(&year, &month, &day, &hour, &minute, &second, &hundredths, &age);
+  if (age == TinyGPS::GPS_INVALID_AGE)
+  {
+    Serial.print("*******    *******    ");
+    SD_date_time = "invalid";
+  }
+  else
+  {
+    char sz[32];
+    sprintf(sz, "%02d/%02d/%02d %02d:%02d:%02d   ",
+        month, day, year, hour, minute, second);
+    Serial.print(sz);
+    SD_date_time = sz;
+  }
+  print_int(age, TinyGPS::GPS_INVALID_AGE, 5);
+  feedgps();
+}
+
+static void print_str(const char *str, int len)
+{
+  int slen = strlen(str);
+  for (int i=0; i<len; ++i)
+    Serial.print(i<slen ? str[i] : ' ');
+  feedgps();
+}
+
+static bool feedgps()
+{
+  while (Serial.available())
+  {
+    if (gps.encode(Serial.read()))
+      return true;
+  }
+  return false;
+}
